@@ -1,7 +1,7 @@
 use crate::lexer::Span;
 
 /// Type expressions
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypeExpr {
     /// Simple named type or path: i32, Vec, std.io.File
     Path(Vec<String>, Span),

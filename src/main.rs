@@ -3,6 +3,11 @@ mod ast;
 mod parser;
 mod typeck;
 mod codegen;
+pub mod error;
+pub mod comptime;
+pub mod concurrency;
+pub mod stdlib;
+pub mod smt;
 
 use std::env;
 use std::fs;
@@ -32,7 +37,8 @@ fn main() {
     let mut lex = lexer::Lexer::new(&source, filename);
     let tokens = lex.tokenize();
     if lex.has_errors() {
-        for err in lex.errors() { eprintln!("{}", err); }
+        let reporter = error::ErrorReporter::new(&source, filename);
+        for err in lex.errors.iter() { reporter.report(err); }
         process::exit(1);
     }
 
@@ -40,7 +46,8 @@ fn main() {
     let mut par = parser::Parser::new(tokens);
     let program = par.parse_program();
     if par.has_errors() {
-        for err in par.errors() { eprintln!("{}", err); }
+        let reporter = error::ErrorReporter::new(&source, filename);
+        for err in par.errors.iter() { reporter.report(err); }
         process::exit(1);
     }
 
@@ -48,11 +55,41 @@ fn main() {
     let mut checker = typeck::TypeChecker::new();
     checker.check_program(&program);
     if checker.has_errors() {
-        for err in checker.errors() { eprintln!("{}", err); }
+        let reporter = error::ErrorReporter::new(&source, filename);
+        for err in checker.errors.iter() {
+            reporter.report(err);
+        }
         process::exit(1);
     }
 
-    // Phase 4: Codegen
+    // Phase 4: SMT Solver Proofs
+    let mut prover = smt::SmtProver::new();
+    if let Some(proof_script) = prover.generate_proofs(&program) {
+        let stem = Path::new(filename).file_stem().unwrap().to_str().unwrap();
+        let proof_file = format!("{}_proof.smt2", stem);
+        fs::write(&proof_file, &proof_script).expect("failed to write SMT proof file");
+        println!("gritc: generated SMT proofs to '{}'", proof_file);
+    }
+
+    // Phase 5: Concurrency verification
+    let mut conc = concurrency::ConcurrencyVerifier::new();
+    conc.check_program(&program);
+    // Print warnings even if no errors
+    if !conc.warnings.is_empty() {
+        let reporter = error::ErrorReporter::new(&source, filename);
+        for w in conc.warnings.iter() {
+            reporter.report(w);
+        }
+    }
+    if conc.has_errors() {
+        let reporter = error::ErrorReporter::new(&source, filename);
+        for err in conc.errors.iter() {
+            reporter.report(err);
+        }
+        process::exit(1);
+    }
+
+    // Phase 6: Codegen
     let stem = Path::new(filename).file_stem().unwrap().to_str().unwrap();
 
     if emit_llvm {
@@ -104,8 +141,8 @@ fn main() {
         return;
     }
 
-    // Clean up
-    let _ = fs::remove_file(&c_file);
+    // Clean up (disabled for debugging)
+    // let _ = fs::remove_file(&c_file);
     println!("gritc: compiled '{}' -> '{}'", filename, exe_file);
 
     if run_mode {

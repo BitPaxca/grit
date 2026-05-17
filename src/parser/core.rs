@@ -4,7 +4,7 @@ use crate::ast::*;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    errors: Vec<String>,
+    pub errors: Vec<crate::error::CompilerError>,
 }
 
 impl Parser {
@@ -13,12 +13,23 @@ impl Parser {
     }
 
     pub fn has_errors(&self) -> bool { !self.errors.is_empty() }
-    pub fn errors(&self) -> &[String] { &self.errors }
+    
+    pub fn error_strings(&self) -> Vec<String> {
+        self.errors.iter().map(|e| e.message.clone()).collect()
+    }
 
     fn error(&mut self, msg: &str) {
         let span = self.current_span();
-        let formatted = format!("{}:{}: parse error: {}", span.line, span.col, msg);
-        self.errors.push(formatted);
+        self.errors.push(crate::error::CompilerError {
+            category: crate::error::ErrorCategory::Syntax,
+            severity: crate::error::Severity::Error,
+            span,
+            code: "E0102".to_string(), // generic parse error
+            message: msg.to_string(),
+            explanation: None,
+            suggestion: None,
+            related: Vec::new(),
+        });
     }
 
     // ── Token helpers ────────────────────────────────────
@@ -111,9 +122,21 @@ impl Parser {
         self.skip_newlines();
         if self.at_end() { return Err(()); }
         let is_pub = self.eat(&TokenKind::Pub);
+        
+        // Check for safety modifiers
+        let safety = if self.eat(&TokenKind::Trusted) {
+            SafetyMode::Trusted
+        } else if self.eat(&TokenKind::Raw) {
+            SafetyMode::Raw
+        } else if self.eat(&TokenKind::Safe) {
+            SafetyMode::Safe
+        } else {
+            SafetyMode::Safe // default
+        };
+
         match self.peek() {
             TokenKind::Import => self.parse_import(),
-            TokenKind::Fn => self.parse_function(is_pub, false, false),
+            TokenKind::Fn => self.parse_function(is_pub, false, false, safety),
             TokenKind::Struct => self.parse_struct(is_pub),
             TokenKind::Enum => self.parse_enum(is_pub),
             TokenKind::Trait => self.parse_trait(is_pub),
@@ -121,7 +144,7 @@ impl Parser {
             TokenKind::Const => self.parse_const(is_pub),
             TokenKind::Type => self.parse_type_alias(is_pub),
             TokenKind::Extern => self.parse_extern(is_pub),
-            TokenKind::Comptime => { self.advance(); self.parse_function(is_pub, true, false) }
+            TokenKind::Comptime => { self.advance(); self.parse_function(is_pub, true, false, safety) }
             _ => { self.error(&format!("expected item, found {:?}", self.peek())); Err(()) }
         }
     }
@@ -147,7 +170,7 @@ impl Parser {
         Ok(Item::Import(ImportDecl { path, names, span }))
     }
 
-    pub fn parse_function(&mut self, is_pub: bool, is_comptime: bool, is_extern: bool) -> Result<Item, ()> {
+    pub fn parse_function(&mut self, is_pub: bool, is_comptime: bool, is_extern: bool, safety: SafetyMode) -> Result<Item, ()> {
         let span = self.current_span();
         self.expect(&TokenKind::Fn)?;
         let name = self.expect_ident()?;
@@ -155,8 +178,20 @@ impl Parser {
         let params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
         let return_type = if self.eat(&TokenKind::Arrow) { Some(Box::new(self.parse_type()?)) } else { None };
-        let body = if self.check(&TokenKind::LBrace) { Some(self.parse_block()?) } else { self.expect_newline(); None };
-        Ok(Item::Function(FnDecl { name, is_pub, is_comptime, is_extern, params, return_type, body, span }))
+        
+        self.skip_newlines();
+        let requires = if self.eat(&TokenKind::Requires) {
+            Some(Box::new(self.parse_expr()?))
+        } else { None };
+        
+        self.skip_newlines();
+        let ensures = if self.eat(&TokenKind::Ensures) {
+            Some(Box::new(self.parse_expr()?))
+        } else { None };
+
+        self.skip_newlines();
+        let body = if self.check(&TokenKind::LBrace) { Some(self.parse_block(Some(safety.clone()))?) } else { self.expect_newline(); None };
+        Ok(Item::Function(FnDecl { name, is_pub, is_comptime, is_extern, safety, params, return_type, requires, ensures, body, span }))
     }
 
     fn parse_param_list(&mut self) -> Result<Vec<Param>, ()> {
@@ -250,7 +285,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?; self.skip_newlines();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            if let Ok(Item::Function(f)) = self.parse_function(false, false, false) { methods.push(f); }
+            if let Ok(Item::Function(f)) = self.parse_function(false, false, false, SafetyMode::Safe) { methods.push(f); }
             self.skip_newlines();
         }
         self.expect(&TokenKind::RBrace)?; self.skip_newlines();
@@ -267,7 +302,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?; self.skip_newlines();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            if let Ok(Item::Function(f)) = self.parse_function(false, false, false) { methods.push(f); }
+            if let Ok(Item::Function(f)) = self.parse_function(false, false, false, SafetyMode::Safe) { methods.push(f); }
             self.skip_newlines();
         }
         self.expect(&TokenKind::RBrace)?; self.skip_newlines();
@@ -299,11 +334,11 @@ impl Parser {
     fn parse_extern(&mut self, is_pub: bool) -> Result<Item, ()> {
         let span = self.current_span();
         self.expect(&TokenKind::Extern)?;
-        if self.check(&TokenKind::Fn) { return self.parse_function(is_pub, false, true); }
+        if self.check(&TokenKind::Fn) { return self.parse_function(is_pub, false, true, SafetyMode::Safe); }
         self.expect(&TokenKind::LBrace)?; self.skip_newlines();
         let mut functions = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            if let Ok(Item::Function(f)) = self.parse_function(false, false, true) { functions.push(f); }
+            if let Ok(Item::Function(f)) = self.parse_function(false, false, true, SafetyMode::Safe) { functions.push(f); }
             self.skip_newlines();
         }
         self.expect(&TokenKind::RBrace)?; self.skip_newlines();
@@ -405,6 +440,11 @@ impl Parser {
                     if self.eat(&TokenKind::Question) { Ok(TypeExpr::Option(Box::new(ty), span)) } else { Ok(ty) }
                 }
             }
+            TokenKind::Type => {
+                self.advance();
+                let ty = TypeExpr::Path(vec!["type".to_string()], span);
+                Ok(ty)
+            }
             _ => {
                 self.error(&format!("expected type, found {:?}", self.peek()));
                 Err(())
@@ -414,7 +454,7 @@ impl Parser {
 
     // ── Block parsing ────────────────────────────────────
 
-    pub fn parse_block(&mut self) -> Result<Block, ()> {
+    pub fn parse_block(&mut self, safety: Option<SafetyMode>) -> Result<Block, ()> {
         let span = self.current_span();
         self.expect(&TokenKind::LBrace)?;
         self.skip_newlines();
@@ -446,7 +486,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Block { stmts, trailing_expr, span })
+        Ok(Block { stmts, trailing_expr, safety, span })
     }
 
     fn try_parse_stmt(&mut self) -> Result<Option<Stmt>, ()> {
@@ -552,14 +592,40 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> Result<Pattern, ()> {
         let span = self.current_span();
-        match self.peek() {
+        match self.peek().clone() {
+            TokenKind::IntLiteral(n) => { self.advance(); Ok(Pattern::Literal(Box::new(Expr::IntLiteral(n, span)))) }
+            TokenKind::StringLiteral(s) => { self.advance(); Ok(Pattern::Literal(Box::new(Expr::StringLiteral(s.clone(), span)))) }
+            TokenKind::True => { self.advance(); Ok(Pattern::Literal(Box::new(Expr::BoolLiteral(true, span)))) }
+            TokenKind::False => { self.advance(); Ok(Pattern::Literal(Box::new(Expr::BoolLiteral(false, span)))) }
             TokenKind::Ident => {
-                let name = self.expect_ident()?;
-                Ok(Pattern::Ident(name, span))
+                let name = self.advance().lexeme.clone();
+                
+                // If it's a path like `EnumName.Variant`
+                if self.eat(&TokenKind::Dot) {
+                    let variant = self.expect_ident()?;
+                    let mut fields = Vec::new();
+                    if self.eat(&TokenKind::LParen) {
+                        if !self.check(&TokenKind::RParen) {
+                            fields.push(self.parse_pattern()?);
+                            while self.eat(&TokenKind::Comma) {
+                                if self.check(&TokenKind::RParen) { break; }
+                                fields.push(self.parse_pattern()?);
+                            }
+                        }
+                        self.expect(&TokenKind::RParen)?;
+                    }
+                    Ok(Pattern::Enum { path: vec![name], variant, fields, span })
+                } else {
+                    if name == "_" {
+                        Ok(Pattern::Wildcard(span))
+                    } else {
+                        Ok(Pattern::Ident(name, span))
+                    }
+                }
             }
             _ => {
-                let name = self.expect_ident()?;
-                Ok(Pattern::Ident(name, span))
+                self.error(&format!("expected pattern, found {:?}", self.peek()));
+                Err(())
             }
         }
     }
@@ -838,7 +904,22 @@ impl Parser {
             TokenKind::While => self.parse_while_expr(),
             TokenKind::Loop => self.parse_loop_expr(),
             TokenKind::LBrace => {
-                let block = self.parse_block()?;
+                let block = self.parse_block(None)?;
+                Ok(Expr::Block(block))
+            }
+            TokenKind::Safe => {
+                self.advance();
+                let block = self.parse_block(Some(SafetyMode::Safe))?;
+                Ok(Expr::Block(block))
+            }
+            TokenKind::Trusted => {
+                self.advance();
+                let block = self.parse_block(Some(SafetyMode::Trusted))?;
+                Ok(Expr::Block(block))
+            }
+            TokenKind::Raw => {
+                self.advance();
+                let block = self.parse_block(Some(SafetyMode::Raw))?;
                 Ok(Expr::Block(block))
             }
             TokenKind::Comptime => {
@@ -858,17 +939,17 @@ impl Parser {
         let span = self.current_span();
         self.expect(&TokenKind::If)?;
         let condition = self.parse_expr()?;
-        let then_block = self.parse_block()?;
+        let then_block = self.parse_block(None)?;
         let mut else_ifs = Vec::new();
         let mut else_block = None;
         while self.eat(&TokenKind::Else) {
             if self.check(&TokenKind::If) {
                 self.advance();
                 let cond = self.parse_expr()?;
-                let block = self.parse_block()?;
+                let block = self.parse_block(None)?;
                 else_ifs.push((cond, block));
             } else {
-                else_block = Some(self.parse_block()?);
+                else_block = Some(self.parse_block(None)?);
                 break;
             }
         }
@@ -901,7 +982,7 @@ impl Parser {
         let pattern = self.parse_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterator = self.parse_expr()?;
-        let body = self.parse_block()?;
+        let body = self.parse_block(None)?;
         Ok(Expr::For { label: None, pattern: Box::new(pattern), iterator: Box::new(iterator), body, span })
     }
 
@@ -909,14 +990,14 @@ impl Parser {
         let span = self.current_span();
         self.expect(&TokenKind::While)?;
         let condition = self.parse_expr()?;
-        let body = self.parse_block()?;
+        let body = self.parse_block(None)?;
         Ok(Expr::While { label: None, condition: Box::new(condition), body, span })
     }
 
     fn parse_loop_expr(&mut self) -> Result<Expr, ()> {
         let span = self.current_span();
         self.expect(&TokenKind::Loop)?;
-        let body = self.parse_block()?;
+        let body = self.parse_block(None)?;
         Ok(Expr::Loop { label: None, body, span })
     }
 
@@ -926,7 +1007,30 @@ impl Parser {
         let kind = if self.eat(&TokenKind::Task) { SpawnKind::Task }
                    else if self.eat(&TokenKind::Thread) { SpawnKind::Thread }
                    else { self.error("expected 'task' or 'thread' after spawn"); return Err(()); };
-        let body = self.parse_block()?;
-        Ok(Expr::Spawn { kind, body, span })
+                   
+        let mut capabilities = Vec::new();
+        if self.eat(&TokenKind::LBracket) {
+            while !self.check(&TokenKind::RBracket) && !self.at_end() {
+                let cap_span = self.current_span();
+                let is_write = if self.check(&TokenKind::Ident) {
+                    let lex = self.current_lexeme();
+                    if lex == "read" { self.advance(); false }
+                    else if lex == "write" { self.advance(); true }
+                    else { self.error("expected 'read' or 'write' in capability list"); return Err(()); }
+                } else {
+                    self.error("expected 'read' or 'write' in capability list"); return Err(());
+                };
+                
+                let var_name = self.expect_ident()?;
+                let cap_kind = if is_write { CapabilityKind::Write } else { CapabilityKind::Read };
+                capabilities.push(Capability { var_name, kind: cap_kind, span: cap_span });
+                
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+            self.expect(&TokenKind::RBracket)?;
+        }
+        
+        let body = self.parse_block(None)?;
+        Ok(Expr::Spawn { kind, capabilities, body, span })
     }
 }

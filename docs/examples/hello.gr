@@ -1,5 +1,6 @@
 // hello.gr — The simplest Grit program
 
 fn main() {
+    let num = 42
     print("Hello, Grit.")
 }

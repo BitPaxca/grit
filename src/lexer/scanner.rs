@@ -8,7 +8,7 @@ pub struct Lexer<'src> {
     pos: usize,
     line: u32,
     col: u32,
-    errors: Vec<String>,
+    pub errors: Vec<crate::error::CompilerError>,
     /// Track the last token kind for newline significance
     last_kind: Option<TokenKind>,
 }
@@ -31,8 +31,8 @@ impl<'src> Lexer<'src> {
         !self.errors.is_empty()
     }
 
-    pub fn errors(&self) -> &[String] {
-        &self.errors
+    pub fn error_strings(&self) -> Vec<String> {
+        self.errors.iter().map(|e| e.message.clone()).collect()
     }
 
     /// Tokenize the entire source into a Vec of tokens.
@@ -95,11 +95,17 @@ impl<'src> Lexer<'src> {
     }
 
     fn error_token(&mut self, msg: &str, start: usize, start_line: u32, start_col: u32) -> Token {
-        let formatted = format!(
-            "{}:{}:{}: error: {}",
-            self.filename, start_line, start_col, msg
-        );
-        self.errors.push(formatted);
+        let span = Span::new(start, self.pos, start_line, start_col);
+        self.errors.push(crate::error::CompilerError {
+            category: crate::error::ErrorCategory::Syntax,
+            severity: crate::error::Severity::Error,
+            span,
+            code: "E0101".to_string(), // generic lexical error code
+            message: msg.to_string(),
+            explanation: None,
+            suggestion: None,
+            related: Vec::new(),
+        });
         self.make_token(TokenKind::Error(msg.to_string()), start, start_line, start_col)
     }
 

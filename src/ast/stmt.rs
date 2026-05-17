@@ -3,7 +3,7 @@ use super::items::Block;
 use super::types::TypeExpr;
 
 /// Statements — things that don't produce a value (or whose value is discarded)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Let(LetStmt),
     Var(VarStmt),
@@ -15,7 +15,7 @@ pub enum Stmt {
     Defer(DeferStmt),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LetStmt {
     pub pattern: Pattern,
     pub ty: Option<Box<TypeExpr>>,
@@ -23,7 +23,7 @@ pub struct LetStmt {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VarStmt {
     pub name: String,
     pub ty: Option<Box<TypeExpr>>,
@@ -37,7 +37,7 @@ pub enum AssignOp {
     AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AssignStmt {
     pub target: Expr,
     pub op: AssignOp,
@@ -45,39 +45,39 @@ pub struct AssignStmt {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExprStmt {
     pub expr: Expr,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReturnStmt {
     pub value: Option<Box<Expr>>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BreakStmt {
     pub label: Option<String>,
     pub value: Option<Box<Expr>>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ContinueStmt {
     pub label: Option<String>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeferStmt {
     pub body: Expr,
     pub span: Span,
 }
 
 /// Patterns for destructuring in let, match, for, etc.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Pattern {
     Ident(String, Span),
     Wildcard(Span),
@@ -104,7 +104,7 @@ pub enum Pattern {
 }
 
 /// Expressions — things that produce a value
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     // Literals
     IntLiteral(u128, Span),
@@ -198,6 +198,7 @@ pub enum Expr {
     // Spawn
     Spawn {
         kind: SpawnKind,
+        capabilities: Vec<Capability>,
         body: Block,
         span: Span,
     },
@@ -241,14 +242,14 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallArg {
     pub name: Option<String>,
     pub value: Expr,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldInit {
     pub name: String,
     pub value: Option<Expr>, // None = shorthand (name == local var)
@@ -256,7 +257,7 @@ pub struct FieldInit {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Box<Expr>>,
@@ -286,4 +287,17 @@ pub enum UnaryOp {
 pub enum SpawnKind {
     Task,
     Thread,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapabilityKind {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone)]
+pub struct Capability {
+    pub var_name: String,
+    pub kind: CapabilityKind,
+    pub span: Span,
 }

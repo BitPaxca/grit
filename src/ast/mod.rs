@@ -3,12 +3,10 @@ mod stmt;
 mod types;
 mod items;
 
-pub use expr::*;
 pub use stmt::*;
 pub use types::*;
 pub use items::*;
 
-use crate::lexer::Span;
 
 /// A unique ID for each AST node — used for later passes (type checking, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

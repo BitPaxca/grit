@@ -7,11 +7,11 @@ mod tests {
     fn parse(src: &str) -> SourceFile {
         let mut lexer = Lexer::new(src, "test.gr");
         let tokens = lexer.tokenize();
-        assert!(!lexer.has_errors(), "Lex errors: {:?}", lexer.errors());
+        assert!(!lexer.has_errors(), "Lex errors: {:?}", lexer.error_strings());
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program();
         if parser.has_errors() {
-            panic!("Parse errors: {:?}", parser.errors());
+            panic!("Parse errors: {:?}", parser.error_strings());
         }
         program
     }

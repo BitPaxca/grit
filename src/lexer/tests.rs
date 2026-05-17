@@ -5,7 +5,7 @@ mod tests {
     fn lex(src: &str) -> Vec<TokenKind> {
         let mut lexer = Lexer::new(src, "test.gr");
         let tokens = lexer.tokenize();
-        assert!(!lexer.has_errors(), "Lexer errors: {:?}", lexer.errors());
+        assert!(!lexer.has_errors(), "Lexer errors: {:?}", lexer.error_strings());
         tokens.into_iter().map(|t| t.kind).collect()
     }
 

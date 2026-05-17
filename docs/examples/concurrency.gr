@@ -1,59 +1,16 @@
-// concurrency.gr — Grit's capability-based concurrency
-
-import std.sync.{channel, Atomic}
-
-struct WorkItem {
-    id: u64
-    payload: String
-}
-
-struct WorkResult {
-    id: u64
-    output: String
-}
-
-fn process(item: WorkItem) -> WorkResult {
-    // Heavy computation here
-    let output = transform(item.payload)
-    WorkResult { id: item.id, output }
-}
-
 fn main() {
-    let (work_tx, work_rx) = channel<WorkItem>(capacity: 256)
-    let (result_tx, result_rx) = channel<WorkResult>(capacity: 256)
-    let counter = Atomic<u64>(0)
-
-    // Spawn 4 worker tasks
-    for _ in 0..4 {
-        // work_rx and result_tx are cloned — channels are multi-producer/multi-consumer
-        let rx = work_rx.clone()
-        let tx = result_tx.clone()
-        let ctr = &counter  // shared atomic — compiler verifies this is safe
-
-        spawn task {
-            for item in rx {
-                let result = process(item)  // item is MOVED in, no aliasing
-                tx.send(result)
-                ctr.fetch_add(1)
-            }
-        }
+    var counter = 0
+    let id = 42
+    
+    // ERROR: capturing mutable state without explicit capability grant
+    // spawn task {
+    //     counter = counter + 1
+    //     print_int(id)
+    // }
+    
+    // OK: explicit capability grant
+    spawn task [write counter] {
+        counter = counter + 1
+        print_int(id)
     }
-
-    // Producer — send work items
-    for i in 0..1000 {
-        work_tx.send(WorkItem {
-            id: i,
-            payload: "item_{i}",
-        })
-    }
-    work_tx.close()  // signal no more work
-
-    // Collector — gather results
-    var results: Vec(WorkResult) = Vec(WorkResult).new()
-    for result in result_rx {
-        results.push(result)
-    }
-
-    print("Processed {counter.load()} items")
-    print("Got {results.len()} results")
 }

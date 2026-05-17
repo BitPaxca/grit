@@ -4,20 +4,39 @@ use super::env::TypeEnv;
 
 pub struct TypeChecker {
     env: TypeEnv,
-    errors: Vec<String>,
+    pub errors: Vec<crate::error::CompilerError>,
     next_infer: u32,
+    current_stmt_borrows: Vec<(String, Vec<String>, bool)>, // (var_name, field_path, is_mut)
+    pub functions: std::collections::HashMap<String, crate::ast::FnDecl>,
+    current_safety: crate::ast::SafetyMode,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self { env: TypeEnv::new(), errors: Vec::new(), next_infer: 0 }
+        Self { env: TypeEnv::new(), errors: Vec::new(), next_infer: 0, current_stmt_borrows: Vec::new(), functions: std::collections::HashMap::new(), current_safety: crate::ast::SafetyMode::Safe }
     }
 
     pub fn has_errors(&self) -> bool { !self.errors.is_empty() }
-    pub fn errors(&self) -> &[String] { &self.errors }
+    
+    pub fn error_strings(&self) -> Vec<String> {
+        self.errors.iter().map(|e| e.message.clone()).collect()
+    }
 
     fn error(&mut self, span: crate::lexer::Span, msg: &str) {
-        self.errors.push(format!("{}:{}: type error: {}", span.line, span.col, msg));
+        self.errors.push(crate::error::CompilerError {
+            category: crate::error::ErrorCategory::Type,
+            severity: crate::error::Severity::Error,
+            span,
+            code: "E0308".to_string(), // generic type error code for now
+            message: msg.to_string(),
+            explanation: None,
+            suggestion: None,
+            related: Vec::new(),
+        });
+    }
+
+    fn error_rich(&mut self, err: crate::error::CompilerError) {
+        self.errors.push(err);
     }
 
     fn fresh_infer(&mut self) -> Ty {
@@ -29,6 +48,13 @@ impl TypeChecker {
     // ── Top-level checking ───────────────────────────────
 
     pub fn check_program(&mut self, program: &SourceFile) {
+        // Register standard library built-in functions
+        for builtin in crate::stdlib::builtin_functions() {
+            let params: Vec<Ty> = builtin.params.iter().map(|(_, ty)| ty.clone()).collect();
+            let ret = builtin.return_type.clone();
+            self.env.define_fn(&builtin.name, Ty::Function { params, ret: Box::new(ret) });
+        }
+
         // First pass: register all type and function declarations
         for item in &program.items {
             self.register_item(item);
@@ -45,6 +71,7 @@ impl TypeChecker {
                 let params: Vec<Ty> = f.params.iter().map(|p| self.resolve_param_type(p)).collect();
                 let ret = f.return_type.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Unit);
                 self.env.define_fn(&f.name, Ty::Function { params, ret: Box::new(ret) });
+                self.functions.insert(f.name.clone(), f.clone());
             }
             Item::Struct(s) => {
                 let fields: Vec<(String, Ty)> = s.fields.iter()
@@ -82,6 +109,14 @@ impl TypeChecker {
     }
 
     fn check_function(&mut self, f: &FnDecl) {
+        // Comptime functions are interpreted, not compiled — skip type-checking their bodies
+        if f.is_comptime {
+            return;
+        }
+
+        let old_safety = self.current_safety.clone();
+        self.current_safety = f.safety.clone();
+
         self.env.push_scope();
 
         // Bind parameters
@@ -91,6 +126,24 @@ impl TypeChecker {
         }
 
         let declared_ret = f.return_type.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Unit);
+        
+        if let Some(req) = &f.requires {
+            let req_ty = self.check_expr(req);
+            if req_ty != Ty::Bool && req_ty != Ty::Error {
+                self.error(f.span, "requires condition must be of type bool");
+            }
+        }
+        
+        if let Some(ens) = &f.ensures {
+            // temporarily bind `result` for checking ensures
+            self.env.push_scope();
+            self.env.define("result", declared_ret.clone(), false);
+            let ens_ty = self.check_expr(ens);
+            if ens_ty != Ty::Bool && ens_ty != Ty::Error {
+                self.error(f.span, "ensures condition must be of type bool");
+            }
+            self.env.pop_scope();
+        }
 
         if let Some(body) = &f.body {
             let body_ty = self.check_block(body);
@@ -101,9 +154,55 @@ impl TypeChecker {
         }
 
         self.env.pop_scope();
+        self.current_safety = old_safety;
     }
 
     // ── Type resolution ──────────────────────────────────
+    
+    fn bind_pattern(&mut self, pattern: &Pattern, ty: &Ty) {
+        match pattern {
+            Pattern::Ident(name, _) => {
+                if name != "_" {
+                    self.env.define(name, ty.clone(), false);
+                }
+            }
+            Pattern::Enum { path, variant, fields, .. } => {
+                if let Ty::Enum { name: _enum_name, variants } = ty {
+                    if let Some((_, v_ty)) = variants.iter().find(|(n, _)| n == variant) {
+                        if let crate::typeck::types::VariantTy::Tuple(types) = v_ty {
+                            for (i, field_pat) in fields.iter().enumerate() {
+                                if i < types.len() {
+                                    self.bind_pattern(field_pat, &types[i]);
+                                }
+                            }
+                        }
+                    }
+                } else if path.len() == 1 {
+                    // Look up enum by name
+                    let enum_name = &path[0];
+                    if let Some(Ty::Enum { variants, .. }) = self.env.lookup_type(enum_name).cloned() {
+                        if let Some((_, v_ty)) = variants.iter().find(|(n, _)| n == variant) {
+                            if let crate::typeck::types::VariantTy::Tuple(types) = v_ty {
+                                for (i, field_pat) in fields.iter().enumerate() {
+                                    if i < types.len() {
+                                        self.bind_pattern(field_pat, &types[i]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Tuple(pats, _) => {
+                if let Ty::Tuple(types) = ty {
+                    for (p, t) in pats.iter().zip(types.iter()) {
+                        self.bind_pattern(p, t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn resolve_type(&mut self, ty: &TypeExpr) -> Ty {
         match ty {
@@ -165,6 +264,11 @@ impl TypeChecker {
     // ── Block & statement checking ───────────────────────
 
     fn check_block(&mut self, block: &Block) -> Ty {
+        let old_safety = self.current_safety.clone();
+        if let Some(s) = &block.safety {
+            self.current_safety = s.clone();
+        }
+        
         self.env.push_scope();
         for stmt in &block.stmts {
             self.check_stmt(stmt);
@@ -175,10 +279,13 @@ impl TypeChecker {
             Ty::Unit
         };
         self.env.pop_scope();
+        
+        self.current_safety = old_safety;
         ty
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
+        self.current_stmt_borrows.clear();
         match stmt {
             Stmt::Let(l) => {
                 let val_ty = self.check_expr(&l.value);
@@ -190,7 +297,15 @@ impl TypeChecker {
                     val_ty
                 };
                 if let Pattern::Ident(name, _) = &l.pattern {
-                    self.env.define(name, ty, false);
+                    self.env.define(name, ty.clone(), false);
+                } else {
+                    self.bind_pattern(&l.pattern, &ty);
+                }
+                
+                // Transfer temporary borrows to the scope (owned by this new variable)
+                let borrows = std::mem::take(&mut self.current_stmt_borrows);
+                for (b_name, b_path, is_mut) in borrows {
+                    self.env.add_scope_borrow(&b_name, b_path, is_mut);
                 }
             }
             Stmt::Var(v) => {
@@ -206,18 +321,61 @@ impl TypeChecker {
                     v.ty.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Error)
                 };
                 self.env.define(&v.name, ty, true);
+                
+                // Transfer temporary borrows
+                let borrows = std::mem::take(&mut self.current_stmt_borrows);
+                for (b_name, b_path, is_mut) in borrows {
+                    self.env.add_scope_borrow(&b_name, b_path, is_mut);
+                }
             }
             Stmt::Assign(a) => {
+                if let Expr::Ident(name, span) = &a.target {
+                    if let Some(binding) = self.env.lookup(name) {
+                        if !binding.is_mutable {
+                            self.error(*span, &format!("cannot assign to immutable variable '{}'", name));
+                        }
+                    }
+                }
                 let target_ty = self.check_expr(&a.target);
                 let value_ty = self.check_expr(&a.value);
                 self.check_assignable(&target_ty, &value_ty, a.span);
+                self.release_temp_borrows();
             }
-            Stmt::Expr(e) => { self.check_expr(&e.expr); }
+            Stmt::Expr(e) => { 
+                self.check_expr(&e.expr); 
+                self.release_temp_borrows();
+            }
             Stmt::Return(r) => {
                 if let Some(val) = &r.value { self.check_expr(val); }
+                self.release_temp_borrows();
             }
             Stmt::Break(_) | Stmt::Continue(_) => {}
-            Stmt::Defer(d) => { self.check_expr(&d.body); }
+            Stmt::Defer(d) => { 
+                self.check_expr(&d.body); 
+                self.release_temp_borrows();
+            }
+        }
+    }
+
+    fn release_temp_borrows(&mut self) {
+        let borrows = std::mem::take(&mut self.current_stmt_borrows);
+        for (b_name, b_path, is_mut) in borrows {
+            self.env.release_borrow(&b_name, &b_path, is_mut);
+        }
+    }
+
+    fn extract_path(&self, expr: &Expr) -> Option<(String, Vec<String>)> {
+        match expr {
+            Expr::Ident(name, _) => Some((name.clone(), Vec::new())),
+            Expr::FieldAccess { object, field, .. } => {
+                if let Some((root, mut path)) = self.extract_path(object) {
+                    path.push(field.clone());
+                    Some((root, path))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -232,14 +390,42 @@ impl TypeChecker {
             Expr::CharLiteral(_, _) => Ty::Char,
 
             Expr::Ident(name, span) => {
+                let mut is_moved = false;
+                let mut is_mut_borrowed = false;
+                let mut is_fn = false;
+                let mut ty = Ty::Error;
+
                 if let Some(binding) = self.env.lookup(name) {
-                    binding.ty.clone()
+                    ty = binding.ty.clone();
+                    match binding.state {
+                        super::env::VarState::Moved(_) => is_moved = true,
+                        super::env::VarState::BorrowedMutably(_) => is_mut_borrowed = true,
+                        _ => {}
+                    }
                 } else if let Some(fn_ty) = self.env.lookup_fn(name) {
-                    fn_ty.clone()
+                    ty = fn_ty.clone();
+                    is_fn = true;
+                } else if let Some(t) = self.env.lookup_type(name) {
+                    ty = t.clone();
+                    is_fn = true;
                 } else {
                     self.error(*span, &format!("undefined variable '{}'", name));
-                    Ty::Error
+                    return Ty::Error;
                 }
+
+                if is_moved {
+                    self.error(*span, &format!("use of moved value '{}'", name));
+                } else if is_mut_borrowed {
+                    self.error(*span, &format!("cannot use '{}' because it is borrowed mutably", name));
+                } else if !is_fn {
+                    let is_copy = ty.is_numeric() || ty == Ty::Bool || ty == Ty::Char;
+                    if !is_copy {
+                        if let Some(b) = self.env.lookup_mut(name) {
+                            b.state = super::env::VarState::Moved(*span);
+                        }
+                    }
+                }
+                ty
             }
             Expr::SelfValue(_) => self.fresh_infer(), // resolved during impl checking
 
@@ -249,12 +435,108 @@ impl TypeChecker {
                 self.check_binary_op(op, &lt, &rt, *span)
             }
             Expr::Unary { op, operand, span } => {
+                // Special handling for borrowing to avoid moving the operand
+                if let UnaryOp::Ref | UnaryOp::RefMut = op {
+                    if let Some((name, path)) = self.extract_path(operand.as_ref()) {
+                        let is_mut = matches!(op, UnaryOp::RefMut);
+                        let binding_info = self.env.lookup(&name).map(|b| (b.is_mutable, b.state.clone(), b.ty.clone()));
+                        
+                        if let Some((is_mutable, state, ty)) = binding_info {
+                            if is_mut && !is_mutable {
+                                self.error(*span, &format!("cannot borrow immutable variable '{}' as mutable", name));
+                            }
+                            let path_state = state.get_path(&path).clone();
+                            match path_state {
+                                super::env::VarState::Moved(prev) => {
+                                    self.error_rich(crate::error::CompilerError {
+                                        category: crate::error::ErrorCategory::Ownership,
+                                        severity: crate::error::Severity::Error,
+                                        span: *span,
+                                        code: "E0382".to_string(),
+                                        message: format!("cannot borrow moved value '{}'", name),
+                                        explanation: Some("The value was already moved, so its original memory is invalid.".to_string()),
+                                        suggestion: None,
+                                        related: vec![crate::error::RelatedSpan { span: prev, description: "moved here".to_string() }],
+                                    });
+                                }
+                                super::env::VarState::BorrowedMutably(prev) => {
+                                    self.error_rich(crate::error::CompilerError {
+                                        category: crate::error::ErrorCategory::Ownership,
+                                        severity: crate::error::Severity::Error,
+                                        span: *span,
+                                        code: "E0201".to_string(),
+                                        message: format!("cannot borrow `{}` as {} — already borrowed mutably", name, if is_mut { "mutable" } else { "immutable" }),
+                                        explanation: Some("You cannot borrow a value while a mutable borrow is active. This prevents data races and iterator invalidation.".to_string()),
+                                        suggestion: None,
+                                        related: vec![crate::error::RelatedSpan { span: prev, description: "mutable borrow starts here".to_string() }],
+                                    });
+                                }
+                                super::env::VarState::BorrowedImmutably(spans) if is_mut => {
+                                    let mut related = Vec::new();
+                                    for s in &spans {
+                                        related.push(crate::error::RelatedSpan { span: *s, description: "immutable borrow starts here".to_string() });
+                                    }
+                                    self.error_rich(crate::error::CompilerError {
+                                        category: crate::error::ErrorCategory::Ownership,
+                                        severity: crate::error::Severity::Error,
+                                        span: *span,
+                                        code: "E0201".to_string(),
+                                        message: format!("cannot borrow `{}` as mutable — already borrowed as immutable", name),
+                                        explanation: Some("You cannot take a mutable reference while immutable references exist.".to_string()),
+                                        suggestion: None,
+                                        related,
+                                    });
+                                }
+                                _ => {}
+                            }
+                            
+                            if let Some(b) = self.env.lookup_mut(&name) {
+                                if is_mut { b.state.set_path(&path, super::env::VarState::BorrowedMutably(*span)); }
+                                else { 
+                                    if let super::env::VarState::BorrowedImmutably(mut spans) = b.state.get_path(&path).clone() {
+                                        spans.push(*span);
+                                        b.state.set_path(&path, super::env::VarState::BorrowedImmutably(spans));
+                                    } else {
+                                        b.state.set_path(&path, super::env::VarState::BorrowedImmutably(vec![*span])); 
+                                    }
+                                }
+                            }
+                            self.current_stmt_borrows.push((name, path, is_mut));
+                            return Ty::Reference { is_var: is_mut, inner: Box::new(ty) };
+                        }
+                    }
+                }
                 let t = self.check_expr(operand);
                 self.check_unary_op(op, &t, *span)
             }
 
             Expr::Call { callee, args, span } => {
                 let callee_ty = self.check_expr(callee);
+                
+                // Enforce Safety Boundaries
+                let callee_fn_name = match callee.as_ref() {
+                    Expr::Ident(name, _) => Some(name.clone()),
+                    Expr::Path(path, _) => Some(path.join(".")),
+                    _ => None,
+                };
+                if let Some(fn_name) = callee_fn_name {
+                    if let Some(decl) = self.functions.get(&fn_name) {
+                        let required_safety = &decl.safety;
+                        match (&self.current_safety, required_safety) {
+                            (SafetyMode::Safe, SafetyMode::Raw) => {
+                                self.error(*span, &format!("cannot call `raw` function '{}' from `safe` code. Wrap it in a `raw {{ ... }}` block.", fn_name));
+                            }
+                            (SafetyMode::Safe, SafetyMode::Trusted) => {
+                                self.error(*span, &format!("cannot call `trusted` function '{}' from `safe` code. Wrap it in a `trusted {{ ... }}` block.", fn_name));
+                            }
+                            (SafetyMode::Trusted, SafetyMode::Raw) => {
+                                self.error(*span, &format!("cannot call `raw` function '{}' from `trusted` code. Wrap it in a `raw {{ ... }}` block.", fn_name));
+                            }
+                            _ => {} // Allowed (Raw -> anything, Trusted -> Trusted/Safe, Safe -> Safe)
+                        }
+                    }
+                }
+
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(&a.value)).collect();
                 match &callee_ty {
                     Ty::Function { params, ret } => {
@@ -282,8 +564,12 @@ impl TypeChecker {
                 }
             }
 
-            Expr::MethodCall { receiver, method, args, span } => {
+            Expr::MethodCall { receiver, method: _, args, span: _ } => {
                 let _recv_ty = self.check_expr(receiver);
+                if let Ty::Enum { name, .. } = &_recv_ty {
+                    for a in args { self.check_expr(&a.value); }
+                    return Ty::Named(name.clone());
+                }
                 for a in args { self.check_expr(&a.value); }
                 // Method resolution is complex — return inferred for now
                 self.fresh_infer()
@@ -291,6 +577,9 @@ impl TypeChecker {
 
             Expr::FieldAccess { object, field, span } => {
                 let obj_ty = self.check_expr(object);
+                if let Ty::Enum { name, .. } = &obj_ty {
+                    return Ty::Named(name.clone());
+                }
                 match &obj_ty {
                     Ty::Struct { fields, .. } => {
                         if let Some((_, fty)) = fields.iter().find(|(n, _)| n == field) {
@@ -334,12 +623,21 @@ impl TypeChecker {
                 }
             }
 
-            Expr::If { condition, then_block, else_block, span, .. } => {
+            Expr::If { condition, then_block, else_ifs, else_block, span, .. } => {
                 let cond_ty = self.check_expr(condition);
                 if cond_ty != Ty::Bool && cond_ty != Ty::Error {
                     self.error(*span, &format!("if condition must be bool, got {}", cond_ty.display()));
                 }
                 let then_ty = self.check_block(then_block);
+                
+                for (cond, block) in else_ifs {
+                    let c_ty = self.check_expr(cond);
+                    if c_ty != Ty::Bool && c_ty != Ty::Error {
+                        self.error(*span, &format!("else if condition must be bool, got {}", c_ty.display()));
+                    }
+                    self.check_block(block);
+                }
+                
                 if let Some(else_b) = else_block {
                     let else_ty = self.check_block(else_b);
                     if then_ty != else_ty && then_ty != Ty::Error && else_ty != Ty::Error {
@@ -352,10 +650,13 @@ impl TypeChecker {
             }
 
             Expr::Match { subject, arms, .. } => {
-                self.check_expr(subject);
+                let subject_ty = self.check_expr(subject);
                 let mut result_ty = Ty::Unit;
                 for arm in arms {
+                    self.env.push_scope();
+                    self.bind_pattern(&arm.pattern, &subject_ty);
                     let arm_ty = self.check_expr(&arm.body);
+                    self.env.pop_scope();
                     result_ty = arm_ty;
                 }
                 result_ty
@@ -377,8 +678,44 @@ impl TypeChecker {
             Expr::Loop { body, .. } => { self.check_block(body); Ty::Never }
             Expr::Block(block) => self.check_block(block),
             Expr::Spawn { body, .. } => { self.check_block(body); Ty::Unit }
-            Expr::Comptime { body, .. } => self.check_expr(body),
-
+            Expr::Comptime { body, span: _ } => {
+                let mut evaluator = crate::comptime::Evaluator::new(&self.functions);
+                let value = evaluator.eval_expr(body);
+                
+                if evaluator.has_errors() {
+                    for err in evaluator.errors {
+                        self.error_rich(err);
+                    }
+                    Ty::Error
+                } else {
+                    match value {
+                        crate::comptime::Value::Int(_) => Ty::I32,
+                        crate::comptime::Value::Float(_) => Ty::F64,
+                        crate::comptime::Value::String(_) => Ty::String,
+                        crate::comptime::Value::Bool(_) => Ty::Bool,
+                        crate::comptime::Value::Char(_) => Ty::Char,
+                        crate::comptime::Value::Unit => Ty::Unit,
+                        // Comptime generics: the comptime block returned an actual type
+                        crate::comptime::Value::Type(ty) => ty,
+                        crate::comptime::Value::Array(items) => {
+                            // Infer element type from first element
+                            let elem_ty = if let Some(first) = items.first() {
+                                match first {
+                                    crate::comptime::Value::Int(_) => Ty::I32,
+                                    crate::comptime::Value::Float(_) => Ty::F64,
+                                    crate::comptime::Value::String(_) => Ty::String,
+                                    crate::comptime::Value::Bool(_) => Ty::Bool,
+                                    crate::comptime::Value::Char(_) => Ty::Char,
+                                    _ => self.fresh_infer(),
+                                }
+                            } else {
+                                self.fresh_infer()
+                            };
+                            Ty::Array(Box::new(elem_ty), items.len())
+                        }
+                    }
+                }
+            }
             Expr::Array(items, _) => {
                 if items.is_empty() {
                     Ty::Array(Box::new(self.fresh_infer()), 0)
