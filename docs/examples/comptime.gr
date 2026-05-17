@@ -1,0 +1,104 @@
+// comptime.gr — Compile-time computation and generics
+
+// Comptime function — runs at compile time, result embedded in binary
+comptime fn fibonacci(n: u64) -> u64 {
+    if n <= 1 {
+        return n
+    }
+    fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+// Compile-time constant
+const FIB_20: u64 = comptime fibonacci(20)
+
+// Comptime for generics — Vec is a comptime function that returns a type
+comptime fn Stack(comptime T: type) -> type {
+    struct {
+        items: Vec(T)
+        
+        fn new() -> Self {
+            Self { items: Vec(T).new() }
+        }
+
+        fn push(var self, item: T) {
+            self.items.push(item)
+        }
+
+        fn pop(var self) -> Option(T) {
+            self.items.pop()
+        }
+
+        fn peek(self) -> Option(&T) {
+            if self.items.len() == 0 {
+                return None
+            }
+            Some(&self.items[self.items.len() - 1])
+        }
+
+        fn len(self) -> usize {
+            self.items.len()
+        }
+
+        fn is_empty(self) -> bool {
+            self.items.len() == 0
+        }
+    }
+}
+
+// Comptime trait checking
+comptime fn is_numeric(comptime T: type) -> bool {
+    T == i8 or T == i16 or T == i32 or T == i64 or T == i128
+    or T == u8 or T == u16 or T == u32 or T == u64 or T == u128
+    or T == f32 or T == f64
+}
+
+fn sum(comptime T: type)(items: &[T]) -> T
+    where comptime is_numeric(T)
+{
+    var total: T = 0
+    for item in items {
+        total += item
+    }
+    total
+}
+
+// Comptime lookup table generation
+comptime fn generate_crc_table() -> [u32; 256] {
+    var table: [u32; 256]
+    for i in 0..256 {
+        var crc: u32 = i
+        for _ in 0..8 {
+            if crc & 1 == 1 {
+                crc = (crc >> 1) ^ 0xEDB88320
+            } else {
+                crc = crc >> 1
+            }
+        }
+        table[i] = crc
+    }
+    table
+}
+
+const CRC_TABLE: [u32; 256] = comptime generate_crc_table()
+
+fn main() {
+    // FIB_20 is a compile-time constant — zero runtime cost
+    print("Fibonacci(20) = {FIB_20}")
+
+    // Stack(i32) is monomorphized at compile time
+    var stack = Stack(i32).new()
+    stack.push(10)
+    stack.push(20)
+    stack.push(30)
+
+    while !stack.is_empty() {
+        match stack.pop() {
+            Some(val) => print("Popped: {val}")
+            None => break
+        }
+    }
+
+    // sum is specialized for f64 at compile time
+    let numbers = [1.0, 2.5, 3.7, 4.2]
+    print("Sum: {sum(f64)(&numbers)}")
+}

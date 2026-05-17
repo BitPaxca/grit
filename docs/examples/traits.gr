@@ -1,0 +1,108 @@
+// traits.gr — Traits, enums, pattern matching, and the type system
+
+trait Drawable {
+    fn draw(self, canvas: &var Canvas)
+    fn bounds(self) -> Rect
+}
+
+trait Resizable: Drawable {
+    fn resize(var self, width: f64, height: f64)
+}
+
+struct Rect {
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+}
+
+struct Circle {
+    center_x: f64
+    center_y: f64
+    radius: f64
+}
+
+struct Square {
+    x: f64
+    y: f64
+    size: f64
+}
+
+impl Drawable for Circle {
+    fn draw(self, canvas: &var Canvas) {
+        canvas.draw_circle(self.center_x, self.center_y, self.radius)
+    }
+
+    fn bounds(self) -> Rect {
+        Rect {
+            x: self.center_x - self.radius,
+            y: self.center_y - self.radius,
+            width: self.radius * 2.0,
+            height: self.radius * 2.0,
+        }
+    }
+}
+
+impl Drawable for Square {
+    fn draw(self, canvas: &var Canvas) {
+        canvas.draw_rect(self.x, self.y, self.size, self.size)
+    }
+
+    fn bounds(self) -> Rect {
+        Rect { x: self.x, y: self.y, width: self.size, height: self.size }
+    }
+}
+
+impl Resizable for Square {
+    fn resize(var self, width: f64, _height: f64) {
+        self.size = width  // square keeps it square
+    }
+}
+
+// Enum with associated data (sum type)
+enum Shape {
+    Circ(Circle)
+    Sq(Square)
+    Group { shapes: Vec(Shape) }
+}
+
+fn total_area(shapes: &[Shape]) -> f64 {
+    var area = 0.0
+    for shape in shapes {
+        area += match shape {
+            Shape.Circ(c) => 3.14159 * c.radius * c.radius
+            Shape.Sq(s) => s.size * s.size
+            Shape.Group { shapes } => total_area(shapes) // recursive
+        }
+    }
+    area
+}
+
+// Option type — no null, ever
+fn find_shape(shapes: &[Shape], name: &str) -> Option(&Shape) {
+    for shape in shapes {
+        if shape.name() == name {
+            return Some(shape)
+        }
+    }
+    None
+}
+
+fn main() {
+    let shapes = [
+        Shape.Circ(Circle { center_x: 0.0, center_y: 0.0, radius: 5.0 }),
+        Shape.Sq(Square { x: 10.0, y: 10.0, size: 4.0 }),
+    ]
+
+    print("Total area: {total_area(&shapes)}")
+
+    // Pattern matching with guards
+    for shape in &shapes {
+        match shape {
+            Shape.Circ(c) if c.radius > 3.0 => print("Big circle!")
+            Shape.Circ(_) => print("Small circle")
+            Shape.Sq(s) => print("Square {s.size}x{s.size}")
+            Shape.Group { shapes } => print("Group of {shapes.len()}")
+        }
+    }
+}

@@ -1,0 +1,5 @@
+// hello.gr — The simplest Grit program
+
+fn main() {
+    print("Hello, Grit.")
+}

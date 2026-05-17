@@ -1,0 +1,9 @@
+[package]
+name = "gritc"
+version = "0.1.0"
+edition = "2021"
+description = "The Grit programming language compiler"
+
+[dependencies]
+
+[dev-dependencies]

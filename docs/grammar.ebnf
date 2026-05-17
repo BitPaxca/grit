@@ -1,0 +1,454 @@
+(* ================================================================== *)
+(* GRIT FORMAL GRAMMAR — EBNF SPECIFICATION                          *)
+(* Version 0.1.0                                                      *)
+(* ================================================================== *)
+(* This is the canonical grammar for the Grit programming language.   *)
+(* The bootstrap compiler (in Rust) implements this grammar exactly.  *)
+(* Notation: standard ISO 14977 EBNF with extensions noted below.     *)
+(*                                                                    *)
+(* Extensions:                                                        *)
+(*   ~X        = anything except X                                    *)
+(*   X - Y     = X but not Y                                          *)
+(*   (* ... *) = comment                                              *)
+(* ================================================================== *)
+
+
+(* ======================== TOP LEVEL ======================== *)
+
+program = { item } ;
+
+item = import_decl
+     | function_decl
+     | struct_decl
+     | enum_decl
+     | trait_decl
+     | impl_block
+     | const_decl
+     | type_alias
+     | extern_block ;
+
+
+(* ======================== IMPORTS ======================== *)
+
+import_decl = "import" , import_path , [ import_list ] , NEWLINE ;
+
+import_path = IDENT , { "." , IDENT } ;
+
+import_list = "." , "{" , IDENT , { "," , IDENT } , [ "," ] , "}" ;
+
+
+(* ======================== FUNCTIONS ======================== *)
+
+function_decl = [ visibility ] , [ "comptime" ] , [ "extern" ] ,
+                "fn" , IDENT ,
+                [ comptime_params ] ,
+                "(" , [ param_list ] , ")" ,
+                [ "->" , type_expr ] ,
+                [ where_clause ] ,
+                ( block | NEWLINE ) ;
+
+visibility = "pub" ;
+
+comptime_params = "(" , "comptime" , IDENT , ":" , type_expr ,
+                  { "," , "comptime" , IDENT , ":" , type_expr } , ")" ;
+
+param_list = param , { "," , param } , [ "," ] ;
+
+param = [ "var" | "owned" ] , ( IDENT | "self" ) , [ ":" , type_expr ] ;
+
+where_clause = "where" , constraint , { "," , constraint } ;
+
+constraint = "comptime" , expression ;
+
+
+(* ======================== STRUCTS ======================== *)
+
+struct_decl = [ visibility ] , "struct" , IDENT ,
+              [ comptime_params ] ,
+              "{" , NEWLINE ,
+              { struct_field , NEWLINE } ,
+              "}" ;
+
+struct_field = [ visibility ] , IDENT , ":" , type_expr ;
+
+
+(* ======================== ENUMS ======================== *)
+
+enum_decl = [ visibility ] , "enum" , IDENT ,
+            [ comptime_params ] ,
+            "{" , NEWLINE ,
+            { enum_variant , NEWLINE } ,
+            "}" ;
+
+enum_variant = IDENT , [ enum_variant_body ] ;
+
+enum_variant_body = "{" , { struct_field , NEWLINE } , "}"
+                  | "(" , type_expr , { "," , type_expr } , ")" ;
+
+
+(* ======================== TRAITS ======================== *)
+
+trait_decl = [ visibility ] , "trait" , IDENT ,
+             [ comptime_params ] ,
+             [ ":" , trait_bounds ] ,
+             "{" , NEWLINE ,
+             { trait_item , NEWLINE } ,
+             "}" ;
+
+trait_bounds = type_path , { "+" , type_path } ;
+
+trait_item = function_decl ;   (* may have no body = required method *)
+                               (* may have body = default method     *)
+
+
+(* ======================== IMPL BLOCKS ======================== *)
+
+impl_block = "impl" , [ comptime_params ] ,
+             type_path ,
+             [ "for" , type_path ] ,
+             "{" , NEWLINE ,
+             { function_decl , NEWLINE } ,
+             "}" ;
+
+
+(* ======================== CONSTANTS & TYPE ALIASES ======================== *)
+
+const_decl = [ visibility ] , "const" , IDENT , ":" , type_expr ,
+             "=" , expression , NEWLINE ;
+
+type_alias = [ visibility ] , "type" , IDENT ,
+             [ comptime_params ] ,
+             "=" , type_expr , NEWLINE ;
+
+
+(* ======================== EXTERN BLOCKS ======================== *)
+
+extern_block = "extern" , "{" , NEWLINE ,
+               { extern_fn_decl , NEWLINE } ,
+               "}" ;
+
+extern_fn_decl = "fn" , IDENT ,
+                 "(" , [ extern_param_list ] , ")" ,
+                 [ "->" , type_expr ] ;
+
+extern_param_list = extern_param , { "," , extern_param } , [ "," , "..." ] ;
+
+extern_param = IDENT , ":" , type_expr ;
+
+
+(* ======================== TYPE EXPRESSIONS ======================== *)
+
+type_expr = type_path
+          | pointer_type
+          | reference_type
+          | array_type
+          | slice_type
+          | tuple_type
+          | fn_type
+          | option_shorthand
+          | "dyn" , type_path
+          | "comptime" , type_expr ;
+
+type_path = IDENT , [ comptime_args ] , { "." , IDENT , [ comptime_args ] } ;
+
+comptime_args = "(" , type_expr_or_value , { "," , type_expr_or_value } , ")" ;
+
+type_expr_or_value = type_expr | expression ;
+
+pointer_type = "*" , [ "var" ] , type_expr ;
+
+reference_type = "&" , [ "var" ] , type_expr ;
+
+array_type = "[" , type_expr , ";" , expression , "]" ;
+
+slice_type = "[" , type_expr , "]" ;
+
+tuple_type = "(" , type_expr , "," , { type_expr , "," } , [ type_expr ] , ")" ;
+
+fn_type = "fn" , "(" , [ type_list ] , ")" , [ "->" , type_expr ] ;
+
+type_list = type_expr , { "," , type_expr } ;
+
+option_shorthand = type_expr , "?" ;
+(* Sugar: i32? is equivalent to Option(i32) *)
+
+
+(* ======================== STATEMENTS ======================== *)
+
+statement = let_stmt
+          | var_stmt
+          | assign_stmt
+          | expression_stmt
+          | return_stmt
+          | break_stmt
+          | continue_stmt
+          | defer_stmt ;
+
+let_stmt = "let" , pattern , [ ":" , type_expr ] , "=" , expression , NEWLINE ;
+
+var_stmt = "var" , IDENT , [ ":" , type_expr ] , [ "=" , expression ] , NEWLINE ;
+
+assign_stmt = assign_target , assign_op , expression , NEWLINE ;
+
+assign_target = IDENT , { "." , IDENT | "[" , expression , "]" } ;
+
+assign_op = "=" | "+=" | "-=" | "*=" | "/=" | "%="
+          | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+
+expression_stmt = expression , NEWLINE ;
+
+return_stmt = "return" , [ expression ] , NEWLINE ;
+
+break_stmt = "break" , [ IDENT ] , [ expression ] , NEWLINE ;
+
+continue_stmt = "continue" , [ IDENT ] , NEWLINE ;
+
+defer_stmt = "defer" , ( expression | block ) , NEWLINE ;
+
+
+(* ======================== PATTERNS ======================== *)
+
+pattern = IDENT
+        | "_"
+        | literal
+        | tuple_pattern
+        | struct_pattern
+        | enum_pattern
+        | ref_pattern
+        | "var" , pattern ;
+
+tuple_pattern = "(" , pattern , "," , { pattern , "," } , [ pattern ] , ")" ;
+
+struct_pattern = type_path , "{" ,
+                 field_pattern , { "," , field_pattern } , [ "," , ".." ] ,
+                 "}" ;
+
+field_pattern = IDENT , [ ":" , pattern ] ;
+
+enum_pattern = type_path , "." , IDENT ,
+               [ "(" , pattern , { "," , pattern } , ")" 
+               | "{" , field_pattern , { "," , field_pattern } , "}" ] ;
+
+ref_pattern = "&" , [ "var" ] , pattern ;
+
+
+(* ======================== EXPRESSIONS ======================== *)
+
+(* Precedence from lowest to highest *)
+expression = or_expr
+           | if_expr
+           | match_expr
+           | for_expr
+           | while_expr
+           | loop_expr
+           | block_expr
+           | spawn_expr
+           | comptime_expr
+           | closure_expr ;
+
+(* Binary operators — listed by precedence, lowest first *)
+or_expr      = and_expr     , { "or"  , and_expr } ;
+and_expr     = compare_expr , { "and" , compare_expr } ;
+compare_expr = bitor_expr   , { compare_op , bitor_expr } ;
+bitor_expr   = bitxor_expr  , { "|" , bitxor_expr } ;
+bitxor_expr  = bitand_expr  , { "^" , bitand_expr } ;
+bitand_expr  = shift_expr   , { "&" , shift_expr } ;
+shift_expr   = range_expr   , { ( "<<" | ">>" ) , range_expr } ;
+range_expr   = add_expr     , [ ".." , [ add_expr ] ] ;
+add_expr     = mul_expr     , { ( "+" | "-" ) , mul_expr } ;
+mul_expr     = unary_expr   , { ( "*" | "/" | "%" ) , unary_expr } ;
+
+compare_op = "==" | "!=" | "<" | ">" | "<=" | ">=" ;
+
+unary_expr = ( "-" | "!" | "~" | "&" | "&var" | "*" ) , unary_expr
+           | postfix_expr ;
+
+postfix_expr = primary_expr , { postfix_op } ;
+
+postfix_op = "." , IDENT                          (* field access *)
+           | "." , IDENT , call_args              (* method call *)
+           | call_args                            (* function call *)
+           | "[" , expression , "]"               (* index *)
+           | "[" , expression , ".." , expression , "]"  (* slice *)
+           | "?"                                  (* error propagation *)
+           | "!" ;                                (* unwrap — panics *)
+
+call_args = "(" , [ arg_list ] , ")" ;
+
+arg_list = arg , { "," , arg } , [ "," ] ;
+
+arg = [ IDENT , ":" ] , expression ;   (* supports named arguments *)
+
+
+(* ======================== PRIMARY EXPRESSIONS ======================== *)
+
+primary_expr = literal
+             | IDENT
+             | "self"
+             | "(" , expression , ")"                   (* grouping *)
+             | "(" , expression , "," , { expression , "," } , [ expression ] , ")"  (* tuple *)
+             | "[" , [ expression , { "," , expression } , [ "," ] ] , "]"           (* array literal *)
+             | struct_literal
+             | type_path ;
+
+struct_literal = type_path , "{" ,
+                 [ field_init , { "," , field_init } , [ "," ] ] ,
+                 "}" ;
+
+field_init = IDENT , ":" , expression
+           | IDENT                       (* shorthand: name == local var *)
+           | ".." , expression ;         (* struct update syntax *)
+
+
+(* ======================== CONTROL FLOW ======================== *)
+
+if_expr = "if" , expression , block ,
+          { "else" , "if" , expression , block } ,
+          [ "else" , block ] ;
+
+match_expr = "match" , expression , "{" , NEWLINE ,
+             { match_arm , NEWLINE } ,
+             "}" ;
+
+match_arm = pattern , [ "if" , expression ] , "=>" , ( expression | block ) ;
+
+for_expr = [ IDENT , ":" ] ,
+           "for" , pattern , "in" , expression , block ;
+
+while_expr = [ IDENT , ":" ] ,
+             "while" , expression , block ;
+
+loop_expr = [ IDENT , ":" ] ,
+            "loop" , block ;
+
+block = "{" , NEWLINE , { statement } , [ expression ] , "}" ;
+
+block_expr = block ;
+
+spawn_expr = "spawn" , ( "task" | "thread" ) ,
+             [ "(" , arg_list , ")" ] ,
+             ( block | expression ) ;
+
+comptime_expr = "comptime" , ( expression | block ) ;
+
+closure_expr = [ "|" , [ param_list ] , "|" ] , ( expression | block ) ;
+
+
+(* ======================== LITERALS ======================== *)
+
+literal = INT_LITERAL
+        | FLOAT_LITERAL
+        | STRING_LITERAL
+        | CHAR_LITERAL
+        | BYTE_LITERAL
+        | BOOL_LITERAL ;
+
+BOOL_LITERAL = "true" | "false" ;
+
+
+(* ======================== LEXICAL GRAMMAR ======================== *)
+
+(* --- Identifiers --- *)
+IDENT = ( LETTER | "_" ) , { LETTER | DIGIT | "_" } ;
+
+LETTER = "a" | "b" | ... | "z" | "A" | "B" | ... | "Z" ;
+
+DIGIT = "0" | "1" | ... | "9" ;
+
+(* --- Integer Literals --- *)
+INT_LITERAL = DEC_LITERAL | HEX_LITERAL | OCT_LITERAL | BIN_LITERAL ;
+
+DEC_LITERAL = DIGIT , { DIGIT | "_" } , [ int_suffix ] ;
+
+HEX_LITERAL = "0x" , HEX_DIGIT , { HEX_DIGIT | "_" } , [ int_suffix ] ;
+
+OCT_LITERAL = "0o" , OCT_DIGIT , { OCT_DIGIT | "_" } , [ int_suffix ] ;
+
+BIN_LITERAL = "0b" , BIN_DIGIT , { BIN_DIGIT | "_" } , [ int_suffix ] ;
+
+HEX_DIGIT = DIGIT | "a" | "b" | "c" | "d" | "e" | "f"
+                   | "A" | "B" | "C" | "D" | "E" | "F" ;
+
+OCT_DIGIT = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ;
+
+BIN_DIGIT = "0" | "1" ;
+
+int_suffix = "i8" | "i16" | "i32" | "i64" | "i128"
+           | "u8" | "u16" | "u32" | "u64" | "u128"
+           | "isize" | "usize" ;
+
+(* --- Float Literals --- *)
+FLOAT_LITERAL = DIGIT , { DIGIT | "_" } , "." , DIGIT , { DIGIT | "_" } ,
+                [ exponent ] , [ float_suffix ] ;
+
+exponent = ( "e" | "E" ) , [ "+" | "-" ] , DIGIT , { DIGIT | "_" } ;
+
+float_suffix = "f32" | "f64" ;
+
+(* --- String Literals --- *)
+STRING_LITERAL = '"' , { string_char } , '"'
+               | RAW_STRING ;
+
+string_char = ~( '"' | "\\" | NEWLINE )
+            | escape_seq ;
+
+escape_seq = "\\" , ( "n" | "r" | "t" | "\\" | '"' | "0"
+           | "x" , HEX_DIGIT , HEX_DIGIT
+           | "u" , "{" , HEX_DIGIT , { HEX_DIGIT } , "}" ) ;
+
+RAW_STRING = "r" , '"' , { ~'"' } , '"' ;
+
+(* --- Byte String Literals --- *)
+BYTE_LITERAL = "b" , '"' , { byte_char } , '"' ;
+
+byte_char = ~( '"' | "\\" | NEWLINE )
+          | escape_seq ;
+
+(* --- Character Literals --- *)
+CHAR_LITERAL = "'" , ( ~( "'" | "\\" ) | escape_seq ) , "'" ;
+
+(* --- Newlines & Whitespace --- *)
+NEWLINE = "\n" | "\r\n" | ";" ;
+(* Semicolons are treated as newlines — optional statement terminators *)
+
+WHITESPACE = " " | "\t" ;
+(* Whitespace is insignificant except for separating tokens *)
+
+(* --- Comments --- *)
+LINE_COMMENT = "//" , { ~NEWLINE } , NEWLINE ;
+
+BLOCK_COMMENT = "/*" , { ~"*/" } , "*/" ;
+(* Block comments nest *)
+
+DOC_COMMENT = "///" , { ~NEWLINE } , NEWLINE ;
+
+
+(* ======================== KEYWORDS ======================== *)
+
+(* Reserved words — cannot be used as identifiers *)
+(*
+  and        break      comptime   const      continue
+  defer      dyn        else       enum       extern
+  false      fn         for        if         impl
+  import     in         let        loop       match
+  or         owned      pub        raw        return
+  self       spawn      struct     task       thread
+  trait      true       trusted    type       var
+  where      while
+*)
+
+
+(* ======================== OPERATORS ======================== *)
+
+(*
+  Arithmetic:    +   -   *   /   %
+  Bitwise:       &   |   ^   ~   <<   >>
+  Comparison:    ==  !=  <   >   <=   >=
+  Logical:       and  or  !
+  Assignment:    =   +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=
+  Reference:     &   &var   *
+  Access:        .   []
+  Range:         ..
+  Error:         ?   !
+  Arrow:         ->  =>
+*)

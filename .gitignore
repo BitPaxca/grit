@@ -1,0 +1,13 @@
+# Rust and Cargo
+/target/
+Cargo.lock
+
+# Grit compiler artifacts
+*.exe
+*.c
+*.ll
+*_build.bat
+
+# OS generated files
+.DS_Store
+Thumbs.db

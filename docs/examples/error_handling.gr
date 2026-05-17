@@ -1,0 +1,57 @@
+// error_handling.gr — Result types, ? propagation, pattern matching
+
+import std.io.File
+import std.collections.HashMap
+
+enum ConfigError {
+    FileNotFound { path: String }
+    ParseError { line: usize, message: String }
+    MissingKey { key: String }
+}
+
+struct Config {
+    values: HashMap(String, String)
+}
+
+impl Config {
+    fn from_file(path: String) -> Result<Config, ConfigError> {
+        let content = File.read_to_string(path)
+            |> map_err(|_| ConfigError.FileNotFound { path })?
+
+        var values = HashMap(String, String).new()
+
+        for (i, line) in content.lines().enumerate() {
+            if line.is_empty() or line.starts_with("#") {
+                continue
+            }
+            match line.split_once("=") {
+                Some((key, val)) => values.insert(key.trim(), val.trim())
+                None => return Err(ConfigError.ParseError {
+                    line: i + 1,
+                    message: "expected key = value",
+                })
+            }
+        }
+        Ok(Config { values })
+    }
+
+    fn get(self, key: &str) -> Result<&String, ConfigError> {
+        self.values.get(key)
+            |> ok_or(ConfigError.MissingKey { key: key.to_owned() })
+    }
+}
+
+fn main() {
+    match Config.from_file("app.toml") {
+        Ok(config) => {
+            match config.get("port") {
+                Ok(port) => print("Starting on port {port}")
+                Err(ConfigError.MissingKey { key }) => print("{key} not set")
+                Err(e) => print("Error: {e}")
+            }
+        }
+        Err(ConfigError.FileNotFound { path }) => print("Not found: {path}")
+        Err(ConfigError.ParseError { line, message }) => print("Line {line}: {message}")
+        Err(e) => print("Error: {e}")
+    }
+}

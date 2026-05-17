@@ -1,0 +1,52 @@
+// ownership.gr — Demonstrating Grit's ownership model
+
+struct Buffer {
+    data: [u8; 1024]
+    len: usize
+}
+
+impl Buffer {
+    fn new() -> Buffer {
+        Buffer {
+            data: [0u8; 1024],
+            len: 0,
+        }
+    }
+
+    fn write(var self, bytes: &[u8]) -> Result<usize, Error> {
+        if self.len + bytes.len() > 1024 {
+            return Err(Error.BufferFull)
+        }
+        // Field-level borrowing — compiler tracks self.data and self.len independently
+        copy(bytes, &var self.data[self.len..])
+        self.len += bytes.len()
+        Ok(bytes.len())
+    }
+
+    fn read(self, offset: usize, len: usize) -> &[u8] {
+        &self.data[offset..offset + len]
+    }
+
+    fn clear(var self) {
+        self.len = 0
+    }
+}
+
+fn main() {
+    var buf = Buffer.new()
+
+    // Move semantics by default
+    let msg = "hello grit"
+    buf.write(msg.as_bytes())?
+
+    // Borrowing — compiler infers, no lifetime annotations
+    let header = buf.read(0, 5)
+    let body = buf.read(5, 5)
+    // Both borrows valid — different regions of the same buffer
+
+    print("header: {header}")
+    print("body: {body}")
+
+    // After last use of header/body, mutable access is fine
+    buf.clear()
+}
