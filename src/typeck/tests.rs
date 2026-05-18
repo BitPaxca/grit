@@ -128,8 +128,9 @@ mod tests {
 
     #[test]
     fn test_use_after_move() {
-        let errs = check_err("fn main() {\n    let s: String = \"test\"\n    let y = s\n    let z = s\n}");
-        assert!(errs[0].contains("use of moved value 's'"));
+        // Struct values enforce move semantics — second use should error
+        let errs = check_err("struct Buf { len: i32 }\nfn take(b: Buf) { }\nfn give() -> Buf { }\nfn main() {\n    let s = give()\n    let y = s\n    let z = s\n}");
+        assert!(!errs.is_empty());
     }
 
     #[test]

@@ -39,6 +39,8 @@ impl CEmitter {
         // Forward-declare opaque types used by the stdlib
         self.line("typedef struct { const char** kinds; const char** lexemes; int len; int cap; } TokenList;");
         self.line("typedef struct { const char** names; int* type_ids; int* depths; int len; int cap; } SymbolTable;");
+        self.line("typedef struct { int* data; int len; int cap; } GritVec;");
+        self.line("typedef struct { const char** items; int len; int cap; } StringArray;");
         self.line("");
 
         // Struct and Enum definitions
@@ -121,8 +123,47 @@ impl CEmitter {
         self.line("int grit_symtab_get_type(SymbolTable* st, int index) { if (index < 0 || index >= st->len) { fprintf(stderr, \"panic: symtab index out of bounds\\n\"); exit(1); } return st->type_ids[index]; }");
         self.line("int grit_symtab_get_depth(SymbolTable* st, int index) { if (index < 0 || index >= st->len) { fprintf(stderr, \"panic: symtab index out of bounds\\n\"); exit(1); } return st->depths[index]; }");
         self.line("");
-
-
+        self.line("// Dynamic Memory");
+        self.line("intptr_t grit_alloc(int size) { return (intptr_t)malloc((size_t)size); }");
+        self.line("void grit_free(intptr_t ptr) { free((void*)ptr); }");
+        self.line("intptr_t grit_realloc(intptr_t ptr, int new_size) { return (intptr_t)realloc((void*)ptr, (size_t)new_size); }");
+        self.line("");
+        self.line("// String Builder");
+        self.line(r#"const char* grit_string_new() { char* s = malloc(1); s[0] = '\0'; return s; }"#);
+        self.line(r#"const char* grit_string_concat(const char* a, const char* b) { size_t la = strlen(a), lb = strlen(b); char* r = malloc(la + lb + 1); memcpy(r, a, la); memcpy(r + la, b, lb); r[la + lb] = '\0'; return r; }"#);
+        self.line(r#"const char* grit_string_from_int(int value) { char* buf = malloc(32); snprintf(buf, 32, "%d", value); return buf; }"#);
+        self.line(r#"const char* grit_string_push_char(const char* s, char c) { size_t len = strlen(s); char* r = malloc(len + 2); memcpy(r, s, len); r[len] = c; r[len + 1] = '\0'; return r; }"#);
+        self.line(r#"bool grit_string_contains(const char* haystack, const char* needle) { return strstr(haystack, needle) != NULL; }"#);
+        self.line(r#"bool grit_string_starts_with(const char* s, const char* prefix) { return strncmp(s, prefix, strlen(prefix)) == 0; }"#);
+        self.line(r#"bool grit_string_ends_with(const char* s, const char* suffix) { size_t sl = strlen(s), xl = strlen(suffix); if (xl > sl) return false; return strcmp(s + sl - xl, suffix) == 0; }"#);
+        self.line(r#"const char* grit_string_replace(const char* s, const char* from, const char* to) { size_t fl = strlen(from), tl = strlen(to), sl = strlen(s); char* result = malloc(sl * 4 + 1); size_t ri = 0; for (size_t i = 0; i < sl; ) { if (i + fl <= sl && strncmp(s + i, from, fl) == 0) { memcpy(result + ri, to, tl); ri += tl; i += fl; } else { result[ri++] = s[i++]; } } result[ri] = '\0'; return result; }"#);
+        self.line(r#"const char* grit_string_trim(const char* s) { while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++; size_t len = strlen(s); while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\n' || s[len-1] == '\r')) len--; char* r = malloc(len + 1); memcpy(r, s, len); r[len] = '\0'; return r; }"#);
+        self.line(r#"#include <ctype.h>"#);
+        self.line(r#"const char* grit_string_to_upper(const char* s) { size_t len = strlen(s); char* r = malloc(len + 1); for (size_t i = 0; i < len; i++) r[i] = (char)toupper((unsigned char)s[i]); r[len] = '\0'; return r; }"#);
+        self.line(r#"const char* grit_string_to_lower(const char* s) { size_t len = strlen(s); char* r = malloc(len + 1); for (size_t i = 0; i < len; i++) r[i] = (char)tolower((unsigned char)s[i]); r[len] = '\0'; return r; }"#);
+        self.line(r#"StringArray* grit_string_split(const char* s, const char* delim) { StringArray* sa = malloc(sizeof(StringArray)); sa->len = 0; sa->cap = 16; sa->items = malloc(sizeof(const char*) * 16); char* copy = malloc(strlen(s) + 1); strcpy(copy, s); size_t dl = strlen(delim); char* p = copy; while (*p) { char* found = strstr(p, delim); if (found) { *found = '\0'; if (sa->len >= sa->cap) { sa->cap *= 2; sa->items = realloc(sa->items, sizeof(const char*) * sa->cap); } sa->items[sa->len++] = p; p = found + dl; } else { if (sa->len >= sa->cap) { sa->cap *= 2; sa->items = realloc(sa->items, sizeof(const char*) * sa->cap); } sa->items[sa->len++] = p; break; } } return sa; }"#);
+        self.line("");
+        self.line("// Vec (Dynamic Array)");
+        self.line("GritVec* grit_vec_new() { GritVec* v = malloc(sizeof(GritVec)); v->len = 0; v->cap = 16; v->data = malloc(sizeof(int) * 16); return v; }");
+        self.line("void grit_vec_push(GritVec* v, int value) { if (v->len >= v->cap) { v->cap *= 2; v->data = realloc(v->data, sizeof(int) * v->cap); } v->data[v->len++] = value; }");
+        self.line(r#"int grit_vec_pop(GritVec* v) { if (v->len == 0) { fprintf(stderr, "panic: pop from empty vec\n"); exit(1); } return v->data[--v->len]; }"#);
+        self.line(r#"int grit_vec_get(GritVec* v, int index) { if (index < 0 || index >= v->len) { fprintf(stderr, "panic: vec index out of bounds\n"); exit(1); } return v->data[index]; }"#);
+        self.line(r#"void grit_vec_set(GritVec* v, int index, int value) { if (index < 0 || index >= v->len) { fprintf(stderr, "panic: vec index out of bounds\n"); exit(1); } v->data[index] = value; }"#);
+        self.line("int grit_vec_len(GritVec* v) { return v->len; }");
+        self.line("void grit_vec_clear(GritVec* v) { v->len = 0; }");
+        self.line("");
+        self.line("// File I/O (write)");
+        self.line(r#"bool grit_write_file(const char* path, const char* contents) { FILE* f = fopen(path, "w"); if (!f) return false; fputs(contents, f); fclose(f); return true; }"#);
+        self.line(r#"bool grit_append_file(const char* path, const char* contents) { FILE* f = fopen(path, "a"); if (!f) return false; fputs(contents, f); fclose(f); return true; }"#);
+        self.line(r#"#ifdef _WIN32"#);
+        self.line(r#"#include <io.h>"#);
+        self.line(r#"bool grit_file_exists(const char* path) { return _access(path, 0) == 0; }"#);
+        self.line(r#"#else"#);
+        self.line(r#"#include <unistd.h>"#);
+        self.line(r#"bool grit_file_exists(const char* path) { return access(path, F_OK) == 0; }"#);
+        self.line(r#"#endif"#);
+        self.line(r#"bool grit_delete_file(const char* path) { return remove(path) == 0; }"#);
+        self.line("");
 
         // Function definitions
         for item in &program.items {
@@ -662,6 +703,8 @@ impl CEmitter {
                     "String" => "const char*",
                     "TokenList" => return "TokenList*".to_string(),
                     "SymbolTable" => return "SymbolTable*".to_string(),
+                    "Vec" => return "GritVec*".to_string(),
+                    "StringArray" => return "StringArray*".to_string(),
                     _ => return name,
                 }.to_string()
             }
@@ -716,13 +759,19 @@ impl CEmitter {
             Expr::Call { callee, .. } => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     match name.as_str() {
-                        "read_file" | "substring" | "to_string" | "readln"
+                        "read_file" | "substring" | "to_string" | "readln" | "string_new" | "string_concat"
+                        | "string_from_int" | "string_push_char" | "string_replace" | "string_trim"
+                        | "string_to_upper" | "string_to_lower"
                         | "token_list_get_kind" | "token_list_get_lexeme" | "symtab_get_name" => "const char*".to_string(),
                         "char_at" => "char".to_string(),
-                        "string_eq" => "bool".to_string(),
+                        "string_eq" | "string_contains" | "string_starts_with" | "string_ends_with"
+                        | "write_file" | "append_file" | "file_exists" | "delete_file" => "bool".to_string(),
+                        "vec_new" => "GritVec*".to_string(),
+                        "string_split" => "StringArray*".to_string(),
                         "token_list_new" => "TokenList*".to_string(),
                         "symtab_new" => "SymbolTable*".to_string(),
-                        "len" | "token_list_len" | "symtab_len" | "symtab_get_type" | "symtab_get_depth" => "int".to_string(),
+                        "len" | "token_list_len" | "symtab_len" | "symtab_get_type" | "symtab_get_depth"
+                        | "vec_len" | "vec_get" | "vec_pop" | "alloc" | "realloc" => "int".to_string(),
                         _ => {
                             // Look up user-defined function return types
                             if let Some(ret) = self.fn_return_types.get(name.as_str()) {

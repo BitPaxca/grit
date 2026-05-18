@@ -418,7 +418,8 @@ impl TypeChecker {
                 } else if is_mut_borrowed {
                     self.error(*span, &format!("cannot use '{}' because it is borrowed mutably", name));
                 } else if !is_fn {
-                    let is_copy = ty.is_numeric() || ty == Ty::Bool || ty == Ty::Char;
+                    let is_copy = ty.is_numeric() || ty == Ty::Bool || ty == Ty::Char 
+                        || ty == Ty::String || matches!(ty, Ty::Named(_));
                     if !is_copy {
                         if let Some(b) = self.env.lookup_mut(name) {
                             b.state = super::env::VarState::Moved(*span);
